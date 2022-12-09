@@ -1,0 +1,646 @@
+---
+title: 'Predicting Retention of First-Year College Students'
+subtitle: 'EDLD 654 Machine Learning (Fall 2022)'
+author: "Amy N. Warnock"
+date: "December 9, 2022"
+output: pdf_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+
+knitr::opts_chunk$set(echo = TRUE, 
+                      eval = TRUE, 
+                      warning = FALSE, 
+                      message = FALSE,
+                      fig.width = 5,
+                      fig.height = 4.25)
+
+# install.packages("recipes")
+# install.packages("finalfit")
+# install.packages("caret")
+# install.packages("cli")
+# install.packages("cutpointr")
+# install.packages("vip")
+# install.packages("kableExtra")
+# tinytex::reinstall_tinytex()
+
+library(tidyverse)
+library(here)
+library(rio)
+library(recipes)
+library(finalfit)
+library(caret) 
+library(cutpointr)
+library(glmnet)
+library(vip)
+library(kableExtra)
+```
+
+```{r load-data, echo = FALSE, results = FALSE}
+
+data_raw <- import(here("data", "nsse19.sav"), setclass = "tbl_df") %>% 
+  factorize()
+
+```
+
+```{r evaluate-data, echo = FALSE, results = FALSE}
+
+str(data_raw)
+
+data <- data_raw %>% 
+  select(-IRclass) %>% # var not needed since all students in the dataset are first-year stus 
+  relocate(id, .before = IRsex19) %>% # move fictitious student ID to front
+  relocate(ret_fall_term_yr4, .after = id) %>% # move outcome var to col 2 
+  mutate(ret_fall_term_yr4 = as.numeric(ret_fall_term_yr4),
+         MAJfirstcol = as.factor(MAJfirstcol))
+
+str(data)
+
+ff_glimpse(data) # check to see if any variables have missingness > 75%
+
+```
+
+# Research Problem
+
+The purpose of this project is to predict the fourth-year retention of undergraduate students based on their responses to a survey of engagement administered during the spring of their first year and various demographic characteristics. The benefits of having a predictive tool for student retention would be the ability to identify students who may be at risk for not persisting and intervening to provide them with support, identify student-level predictors that are malleable and which can be intervened upon, identify institutional-level predictors that the UO can address (e.g., programming, services, quality of instruction, factors related to sense of belonging), and to hopefully improve fourth-year retention rates.  
+
+# Description of the Data
+
+The participants in the dataset are 531 first-year students who attended UO during the 2018-2019 school year and responded to the National Survey of Student Engagement (NSSE) in the spring of 2019. In addition to responses and some demographics collected during the administration of NSSE, additional demographic variables and retention to the fall of the students' fourth year were sourced from UO's Integrative Data and Reporting (IDR) data warehouse, which stores a vast amount of institutional student records. I selected 32 variables from the original NSSE dataset and IDR for this project. These variables include a fictitious student identification number, fourth-year retention outcome (i.e., whether or not the student went on to register for fall term of their fourth year), and 30 predictors representing a range of demographic variables, responses to single-items from NSSE, and  scale scores of NSSE engagement indicators. The NSSE and variables are described in further detail below, along with output from the `ff_glimpse()` summarizing descriptives and frequences for all variables. 
+
+## The National Survey of Student Engagement (NSSE)
+
+The National Survey of Student Engagement (NSSE) is a survey administered to first-year and senior undergraduate students at hundreds of four-year institutions across the United States and Canada. It has been administered approximately every 2 years to students at UO since 2003. The purposes of collecting this data include national benchmarking purposes (i.e., how responses from UO students compare to other institutions), accountability (i.e., evidence of quality of education and programs), and for program review and assessment purposes (i.e., identifying areas for improvement).
+
+In addition to collecting some demographic information, the NSSE ask students about their engagement and participation with campus programs, services, and activities, their learning, and their experiences. NSSE has developed 10 "Engagement Indicators" representing different areas of student engagement, experiences, and perceptions and provides scale scores for each indicator. The Engagement Indicators are Higher-Order Learning (HO), Reflective & Integrative Learning (RI), Learning Strategies (LS), Quantitative Reasoning (QR), Collaborative Learning (CL), Discussions with Diverse Others (DD), Student-Faculty Interaction (SF), Effective Teaching Practices (ET), Quality of Interactions (QI), and Supportive Environment (SE). I included all 10 indicators as predictors in this analysis. All of the engagement indicators are numeric scale scores. In addition, I included responses to the following single items, which are not represented in the indicator scale scores: `returnexp` (whether the student expects to return), `evalexp` (how the student rates their educational experience at UO), `edaspire` (the highest level of education the student plans to complete), `tmworkhrs` (the number of hours working for pay each week), `tmcocurrhrs` (the number of hours participating in cocurricular activities each week), `tmservicehrs` (number of hours volunteering each week), `tmcommutehrs` (hours commuting per week), `tmcarehrs` (hours caring for a dependent each week), `tmreadinghrs` (hours spent reading for courses each week), and `tmrelaxhrs` (hours spent relaxing each week). The `returnexp`, `evalexp`, and `edaspire` variables are categorical. All weekly hour time variables are numeric. 
+
+## Demographic Variables (Institution-Reported and NSSE)
+
+The institution-reported demographic variables included in this analysis were race/ethnicity, Oregon residency status, first-generation status, and binary gender. Race/ethnicity was recoded into three categories in order to protect student privacy and confidentiality (i.e., cell sizes were < 10 for some original categories). The three categories were Traditionally Marginalized Domestic Students, White, and Multiracial. International students were not included in this analysis. Traditionally Marginalized Domestic Students are non-International students whose race/ethnicity is reported as American Indian/Alaska Native, Asian, Black, Native Hawaiian/Pacific Islander, or Hispanic or Latine/a/o/x. Oregon residency status is whether or not the student is considered a resident of Oregon by the UO. First-generation status is determined by the highest level of education obtained by parents/guardians. Students are considered first generation if neither parent/guardian attained a bachelor's degree. Continuing-generation students are those students with at least one parent/guardian who obtained a bachelor's degree or higher. Binary gender (male or female) was selected to protect student privacy and confidentiality (i.e., cell sizes for non-binary gender categories were < 10).
+
+Demographic variables collected by NSSE were the student's living situation (e.g., campus housing, residence within walking distance, residence further than walking distance, etc.), student athlete status (student athlete or not), Greek life involvement (involved or not), disability (e.g., sensory impairment, mobility impairment, learning disability, mental health condition, etc.), and category of first major (e.g., arts and humanities, business, etc.).
+
+All demographic variables are categorical. 
+
+## Retention
+
+The retention variable in this analysis was pulled from the UO IDR data warehouse. It corresponds to whether or not the student registered for and attended fall term of their fourth year at UO. The variable is coded as 1 = "did not attend fall term of their fourth year", 0 = "did register and attend fall term of their fourth year. The positive was assigned in this way because we would like to be able to predict the students who are at risk of not persisting to their fourth year. 
+
+## Missing Data Analysis and Descriptive Statistics
+
+I evaluated all variables for missingness using the `ff_glimpse()` function. There were not any variables with more than 75% of observations missing, so no variables were removed prior to analysis. During the data preparation phase, I used imputation for missing values. Mean imputation was used for numeric variables, while mode imputation was used for categorical variables. 
+
+```{r missing-descrip}
+
+ff_glimpse(data) 
+
+```
+
+# Description of the Models
+
+Three models were selected to predict student retention outcomes: (a) logistic regression with no regularization, (b) logistic regression with ridge penalty, and (c) logistic regression with lasso penalty. Logistic regression was selected because the outcome, retention, is a binary variable. Each model is increasingly complex. The lambda hyperparameter was tuned for the logistic regression with ridge penalty. For the logistic regression with lasso penalty, I set alpha equal to 1 and tuned the lambda hyperparameter. For all three models, I used an 80-20 training/test data split and 10-fold cross validation. The classification cut point used for all three models was 0.50. 
+
+In addition to having a binary dependent variable, assumptions of linear regression include independence of observations and little to no multicollinearity between independent variables. To address any issues of multicollinearity, I include a step in the `recipes()` blueprint to remove any variables that were strongly correlated with each other (i.e., *r* > .75). 
+
+## Data Preprocessing
+
+Prior to training and fitting the three models, I prepared the data using `recipes()` to assign roles to each variable ("id", "outcome", "predictor") and process the variables. First, I created an indicator variable for missingness for all predictors. This enables the model to assess missingness as a predictor. I then removed all predictors with zero variance, as these would not contribute to the predictive ability of the models. I followed this with mean and mode imputation and normalizing all numeric predictors. Finally, I created dummy variables for all categorical predictors, removed any variables that were strongly correlated with each other (as described previously), and transformed the outcome variable into a factor. The `recipe()` used for the blueprint in this analysis is below. 
+
+
+```{r cat-num-preds}
+
+# create objects for categorical and numeric predictors 
+# (although I did not end up needing numpreds in my recipe)
+
+catpreds <- data %>% 
+  select(where(is.factor)) %>% 
+  colnames()
+
+catpreds
+
+numpreds <- data %>% 
+  select(where(is.numeric),
+         -id,
+         -ret_fall_term_yr4) %>% 
+  colnames()
+
+numpreds
+
+```
+
+```{r blueprint}
+
+# Use recipes to create a blueprint
+
+blueprint <- recipe(x = data,
+                    vars = colnames(data),
+                    roles = c('id', 'outcome', rep('predictor', 30))) %>%
+  step_indicate_na(all_predictors()) %>% #indicator of missingness for all preds
+  step_zv(all_predictors()) %>% #remove  preds with 0 variance
+  step_impute_mean(all_numeric_predictors()) %>% #replace NA w/ mean for num
+  step_impute_mode(all_of(catpreds)) %>% #replace NA w/ mode for cat
+  step_normalize(all_numeric_predictors()) %>%  #normalize num preds
+  step_dummy(all_of(catpreds), one_hot = TRUE) %>%  #dummy code
+  step_corr(all_numeric_predictors(), threshold = 0.75) %>% #remove variables 
+  #which are highly correlated with each other to address assumptions of 
+  # logistic regression
+  step_num2factor(ret_fall_term_yr4,
+                  transform = function(x) x + 1,
+                  levels = c('Negative', 'Positive'))
+
+blueprint
+```
+
+
+```{r view-blueprint, eval = FALSE, echo = FALSE}
+
+View(blueprint %>% prep() %>% summary)
+
+```
+
+```{r split-data}
+
+# Create training and test datasets using an 80-20 split
+
+set.seed(303949) 
+  
+loc <- sample(1:nrow(data), round(nrow(data) * 0.8))
+
+data_tr <- data[loc, ]
+
+data_te <- data[-loc, ]
+
+```
+
+```{r split-data-dim}
+
+# Examine dimensions
+
+dim(data_tr)
+
+dim(data_te)
+
+```
+
+```{r shuffle-data-tr}
+
+# Randomly shuffle the training dataset
+
+set.seed(34322) # for reproducibility
+
+data_tr <- data_tr[sample(nrow(data_tr)), ]
+
+```
+
+```{r folds}
+
+# Create 10 folds with equal size
+
+folds <- cut(seq(1, nrow(data_tr)), breaks = 10, labels = FALSE)
+
+# Create the list for each fold 
+
+my.indices <- vector('list', 10)
+
+for(i in 1:10){
+  my.indices[[i]] <- which(folds != i)
+}
+
+```
+
+```{r cv}
+
+cv <- trainControl(method = "cv",
+                   index = my.indices,
+                   classProbs = TRUE,
+                   summaryFunction = mnLogLoss)
+
+```
+
+## Evaluating Model Performance
+
+To evaluate model performance, I calculated and compared logLoss (LL), Area Under the Curve (AUC), accuracy (ACC), True Positive Rate (TPR or sensitivity), True Negative Rate (TNR or specificity), and precision (PRE). As the purpose of this project is to predict students who do not persist to their fourth year (i.e., students who are categorized as "positive" for not retaining), I prioritized the AUC and TPR metrics in my evaluation. 
+
+# Model Fit
+
+## Model 1: Logistic Regression With No Regularization
+
+```{r train-logistic-no-reg}
+
+# Train the logistic regression model (no regularization) using 
+# 10-fold cross validation
+
+caret_mod <- caret::train(blueprint, 
+                          data = data_tr, 
+                          method = "glm",
+                          family = 'binomial', 
+                          metric = 'logLoss',
+                          trControl = cv)
+```
+
+```{r train-logistic-no-reg-caret}
+
+# output - results not included in PDF due to length
+
+caret_mod
+
+```
+
+```{r train-logistic-no-reg-logloss}
+
+# save logLoss
+
+logLoss_noreg <- 2.216441
+
+
+```
+
+```{r logistic-no-reg-predict}
+
+# apply the model to the test dataset
+
+predicted_te <- predict(caret_mod, data_te, type = 'prob')
+
+```
+
+```{r separation-logistic-no-reg}
+
+# Plot separation of distributions
+
+group0 <- which(data_te$ret_fall_term_yr4 == 0)
+
+group1 <- which(data_te$ret_fall_term_yr4 == 1)
+
+plot(density(predicted_te[group0, ]$Positive, adjust = 1.5), 
+     xlab = '', main = '')
+
+points(density(predicted_te[group1, ]$Positive, adjust = 1.5), 
+       lty = 2, type = 'l')
+
+legend(x = .4, y = 2, c('Negative', 'Positive'), lty = c(1, 2), bty = 'n')
+
+```
+
+```{r logistic-no-reg-auc}
+
+# Calculate AUC
+
+cut.obj <- cutpointr(x = predicted_te$Positive,
+                     class = data_te$ret_fall_term_yr4)
+
+auc_noreg <- auc(cut.obj)
+
+auc_noreg
+
+```
+
+```{r logistic-no-reg-confusion, results = FALSE}
+
+# Confusion matrix with the threshold set at .5
+
+pred_class <- ifelse(predicted_te$Positive > .5, 1, 0)
+
+confusion <- table(pred_class, data_te$ret_fall_term_yr4)
+
+```
+
+```{r logistic-no-reg-perf}
+
+# Accuracy 
+
+(confusion[2, 2] + confusion[1, 1]) / 
+  (confusion[1, 1] + confusion[1, 2] + confusion[2, 1] + confusion[2, 2])
+
+acc_noreg <- (confusion[2, 2] + confusion[1, 1]) / 
+  (confusion[1, 1] + confusion[1, 2] + confusion[2, 1] + confusion[2, 2])
+
+# True Positive Rate (sensitivity)
+
+confusion[2, 2] / (confusion[2, 2] + confusion[1, 2])
+
+tpr_noreg <- confusion[2, 2] / (confusion[2, 2] + confusion[1, 2])
+
+# True Negative Rate (specificity)
+
+confusion[1, 1] / (confusion[1, 1] + confusion[2, 1])
+
+tnr_noreg <- confusion[1, 1] / (confusion[1, 1] + confusion[2, 1])
+
+# Precision
+
+confusion[2, 2] / (confusion[2, 2] + confusion[2, 1])
+
+pre_noreg <- confusion[2, 2] / (confusion[2, 2] + confusion[2, 1])
+
+```
+
+## Model 2: Logistic Regression With Ridge Penalty
+
+```{r logistic-ridge-grid}
+
+# Hyperparameter tuning grid for ridge penalty (lambda), alpha = 0
+
+grid <- data.frame(alpha = 0, lambda = c(seq(0, 1, .01)))
+
+```
+
+```{r logistic-ridge-train}
+# Train the logistic regression model
+
+# Sys.time()
+
+caret_mod_ridge <- caret::train(blueprint, 
+                                     data      = data_tr, 
+                                     method    = "glmnet",
+                                     family    = 'binomial',
+                                     metric    = 'logLoss',
+                                     trControl = cv,
+                                     tuneGrid  = grid)
+
+# Sys.time()
+```
+
+```{r logistic-ridge-train-caret, results = FALSE}
+
+# output - results not included in PDF due to length
+
+caret_mod_ridge
+
+```
+
+```{r logistic-ridge-train-bestune}
+
+# determine optimal lambda
+
+caret_mod_ridge$bestTune
+
+# save logLoss
+
+logLoss_ridge <- 0.5388230
+
+```
+
+```{r logistic-ridge-plot}
+
+plot(caret_mod_ridge)
+
+```
+
+```{r logistic-ridge-predict}
+
+# Apply the model to the test dataset
+
+predicted_ridge_te <- predict(caret_mod_ridge, data_te, type = 'prob')
+
+```
+
+```{r logistic-ridge-auc}
+
+# AUC
+
+cut.obj.ridge <- cutpointr(x = predicted_ridge_te$Positive,
+                           class = data_te$ret_fall_term_yr4)
+
+auc_ridge <- auc(cut.obj.ridge)
+
+auc_ridge
+
+```
+
+```{r logistic-ridge-confusion, results = FALSE}
+
+# Ridge confusion matrix with the threshold at 0.5
+
+pred_class_ridge <- ifelse(predicted_ridge_te$Positive > .5, 1, 0)
+
+confusion_ridge <- table(pred_class_ridge, data_te$ret_fall_term_yr4)
+
+```
+
+```{r logistic-ridge-perf}
+
+# Accuracy 
+
+(confusion_ridge[2, 2] + confusion_ridge[1, 1]) / 
+  (confusion_ridge[1, 1] + confusion_ridge[1, 2] + confusion_ridge[2, 1] + 
+     confusion_ridge[2, 2])
+
+acc_ridge <- (confusion_ridge[2, 2] + confusion_ridge[1, 1]) / 
+  (confusion_ridge[1, 1] + confusion_ridge[1, 2] + confusion_ridge[2, 1] + 
+     confusion_ridge[2, 2])
+
+# True Positive Rate (sensitivity)
+
+confusion_ridge[2, 2] / (confusion_ridge[2, 2] + confusion_ridge[1, 2])
+
+tpr_ridge <- confusion_ridge[2, 2] / 
+  (confusion_ridge[2, 2] + confusion_ridge[1, 2])
+
+# True Negative Rate (specificity)
+
+confusion_ridge[1, 1] / (confusion_ridge[1, 1] + confusion_ridge[2, 1])
+
+tnr_ridge <- confusion_ridge[1, 1] / 
+  (confusion_ridge[1, 1] + confusion_ridge[2, 1])
+
+# Precision
+
+confusion_ridge[2, 2] / (confusion_ridge[2, 2] + confusion_ridge[2, 1])
+
+pre_ridge <- confusion_ridge[2, 2] / 
+  (confusion_ridge[2, 2] + confusion_ridge[2, 1])
+```
+
+## Model 3: Logistic Regression With Lasso Penalty
+
+```{r logistic-lasso-grid}
+
+# Hyperparameter tuning grid for ridge penalty (lambda), alpha = 0
+
+grid_lasso <- data.frame(alpha = 1, lambda = seq(0, 1, .01)) 
+
+```
+
+```{r logistic-lasso-train}
+# Train the logistic regression model
+
+# Sys.time()
+
+caret_mod_lasso <- caret::train(blueprint, 
+                                     data      = data_tr, 
+                                     method    = "glmnet",
+                                     family    = 'binomial',
+                                     metric    = 'logLoss',
+                                     trControl = cv,
+                                     tuneGrid  = grid_lasso)
+
+# Sys.time()
+```
+
+
+```{r logistic-lasso-train-caret, results = FALSE}
+
+# output - results not included in PDF due to length
+
+caret_mod_lasso
+
+```
+
+
+```{r logistic-lasso-train-caret-best-tune}
+
+# determine optimal lambda
+
+caret_mod_lasso$bestTune
+
+# save logLoss
+
+logLoss_lasso <- 0.5357162
+
+```
+
+```{r logistic-lasso-plot}
+
+plot(caret_mod_lasso)
+
+```
+
+```{r logistic-lasso-predict}
+
+# Apply the model to the test dataset
+
+predicted_lasso_te <- predict(caret_mod_lasso, data_te, type = 'prob')
+
+```
+
+```{r logistic-lasso-auc}
+
+# AUC
+
+cut.obj.lasso <- cutpointr(x = predicted_lasso_te$Positive,
+                           class = data_te$ret_fall_term_yr4,
+                           pos_class = 1)
+
+auc_lasso <- auc(cut.obj.lasso)
+
+auc_lasso
+
+```
+
+```{r lasso-confusion, results = FALSE}
+
+# Lasso confusion matrix with the threshold at 0.5
+
+pred_class_lasso <- ifelse(predicted_lasso_te$Positive > .5, 1, 0)
+
+confusion_lasso <- table(pred_class_lasso, data_te$ret_fall_term_yr4)
+
+```
+
+```{r lasso-perf}
+
+# Accuracy 
+
+(confusion_lasso[2, 2] + confusion_lasso[1, 1]) / 
+  (confusion_lasso[1, 1] + confusion_lasso[1, 2] + confusion_lasso[2, 1] +
+     confusion_lasso[2, 2])
+
+acc_lasso <- (confusion_lasso[2, 2] + confusion_lasso[1, 1]) / 
+  (confusion_lasso[1, 1] + confusion_lasso[1, 2] + confusion_lasso[2, 1] + 
+     confusion_lasso[2, 2])
+
+# True Positive Rate (sensitivity)
+
+confusion_lasso[2, 2] / (confusion_lasso[2, 2] + confusion_lasso[1, 2])
+
+tpr_lasso <- confusion_lasso[2, 2] / 
+  (confusion_lasso[2, 2] + confusion_lasso[1, 2])
+
+# True Negative Rate (specificity)
+
+confusion_lasso[1, 1] / (confusion_lasso[1, 1] + confusion_lasso[2, 1])
+
+tnr_lasso <- confusion_lasso[1, 1] / 
+  (confusion_lasso[1, 1] + confusion_lasso[2, 1])
+
+# Precision
+
+confusion_lasso[2, 2] / (confusion_lasso[2, 2] + confusion_lasso[2, 1])
+
+pre_lasso <- confusion_lasso[2, 2] / 
+  (confusion_lasso[2, 2] + confusion_lasso[2, 1])
+```
+
+# Model Performance and Comparison
+
+```{r table-prep, echo = FALSE}
+
+Model <- c("Logistic Regression: No Regularization", 
+           "Logistic Regression: Ridge Penalty", 
+           "Logistic Regression: Lasso Penalty")
+LL <- c(logLoss_noreg, logLoss_ridge, logLoss_lasso)
+AUC <- c(auc_noreg, auc_ridge, auc_lasso)
+ACC <- c(acc_noreg, acc_ridge, acc_lasso)
+TPR <- c(tpr_noreg, tpr_ridge, tpr_lasso)
+TNR <- c(tnr_noreg, tnr_ridge, tnr_lasso)
+PRE <- c(pre_noreg, pre_ridge, pre_lasso)
+  
+perf <- data.frame(Model, LL, AUC, ACC, TPR, TNR, PRE)
+
+```
+
+To evaluate and compare performance of the three models, I calculated and tabled the LL, AUC, TPR, TNR, and PRE metrics for each model. I evaluated these in conjunction with the confusion matrix for each model as an accompanying visual aid. The logistic regression model with lasso penalty has the lowest AUC. The logistic regression model with no regularization has approximately the same AUC as the logistic regression model with ridge penalty. However, I would select the model with no penalty given its higher TPR. As the purpose of this predictive model would be to predict students who may not retain to their fourth year, this metric is of more importance than TNR or PRE. Over-predicting would not have negative consequences for students (assuming any actions taken by the institution would not be negative and were not overly intrusive). Alternatively, under-predicting would mean missing more students who may not persist to their fourth year. Actions taken by the institution for students predicted as being at risk would not be punitive. There would be no harm in contacting a student or connecting them with supports in the event they were falsely predicted as being at risk. There may be resource considerations, depending on what intervention or prevention measures were taken. 
+
+```{r table-perf, echo = FALSE}
+
+perf %>% 
+  kable(caption = "Model Performance Metrics",
+        booktabs = TRUE,
+        format = "latex",
+        digits = 3, 
+        align = c("l", "c", "c", "c", "c", "c", "c"))
+  
+```
+
+```{r confusion-noreg}
+
+# Confusion matrix for logistic regression with no regularization
+
+confusion
+
+```
+
+```{r confusion-ridge}
+
+# Confusion matrix for logistic regression with ridge penalty
+
+confusion_ridge
+
+```
+
+```{r confusion-lasso}
+
+# Confusion matrix for logistic regression with lasso penalty
+
+confusion_lasso
+
+```
+
+# Discussion and Conclusion 
+
+It was surprising to me that the logistic regression model with no regularization performed the best. After selecting the logistic regression model with no regularization, I plotted its top-ten predictors. Interestingly, the Quantitative Reasoning (QR) and Reflective & Integrative Learning (RI) were the top two predictors. Less surprisingly, the student anticipating that they would return to UO was the third-most important predictors. Other predictors of importance included responding "probably yes" that they would choose to go to UO if they could do their education over again, the missing indicator for RI, Learning Strategies (LS), the missing indicator for first-generation status, Student-Faculty Interaction (SF), being an Oregon resident, and Quality of Interactions (QI). I think these results may shed some insight on areas of engagement that are related to student retention. My next step will be to examine the individual items that are used to calculate the QR, RI, LS, SF, and QI indicator scores to see if there are patterns, insights, or potentially areas that could be improved by UO. I think it would also be worthwhile conducting a similar analysis with a greater sample size and with additional variables included. It is worth noting that not all first-year students complete the survey, and it is not administered every year. Regardless, results from these models may still be useful in identifying institutional-level areas of importance that are working well or need improvement. 
+
+```{r plot-top10-preds-noreg}
+
+# plot of top 10 predictors
+
+vip(caret_mod, num_features = 10, geom = "point") + 
+  theme_minimal() +
+  theme(plot.title.position = "plot") +
+  labs(title = "Top 10 Features of Log. Regression With No Regularization")
+
+```
+
+
